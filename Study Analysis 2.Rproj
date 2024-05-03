@@ -1,13 +1,210 @@
-Version: 1.0
+---
+title: "CODE"
+format: html
+editor: visual
+---
 
-RestoreWorkspace: Default
-SaveWorkspace: Default
-AlwaysSaveHistory: Default
+{r}
+#| label: Load R packages
+#| include: false 
 
-EnableCodeIndexing: Yes
-UseSpacesForTab: Yes
-NumSpacesForTab: 2
-Encoding: UTF-8
+library(osfr)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(ez)
+library(patchwork)
+library(gee)
+library(tidyverse)
 
-RnwWeave: Sweave
-LaTeX: pdfLaTeX
+{r}
+#| label: Load Data 
+#| include: false 
+
+osf_retrieve_node("https://osf.io/jky28/") %>%
+    osf_ls_files(n_max = 100) %>%
+    osf_download(path = "data", conflicts = "skip")
+
+files <- list.files(full.names= TRUE, path = "data",pattern='.csv')
+#Data frame
+DF <- bind_rows(lapply(files,read_csv))
+
+
+{r}
+#| label: clean up time
+#| include: false 
+
+DF %>%
+    mutate(prolific_subject_id = as.character(group_indices(., prolific_subject_id)))
+
+num_prolific_subject_ids <- DF %>%
+  group_by(prolific_subject_id) %>%
+    summarise(num_prolific_subject_ids = n_distinct(prolific_subject_id)) 
+
+
+{r}
+#| label: fix DF
+#| include: false
+FIXED_DF <- DF %>%
+    ungroup() %>%
+    mutate(jersey_number = case_when(
+        str_extract(stimulus, "(?<=/)(\\d+)") %in% c("71") ~ "71",
+        str_extract(stimulus, "(?<=/)(\\d+)") %in% c("81") ~ "81",
+        str_extract(stimulus, "(?<=/)(\\d+)") %in% c("91") ~ "91",
+        str_extract(stimulus, "(?<=/)(\\d+)") %in% c("18") ~ "18",
+        str_extract(stimulus, "(?<=/)(\\d+)") %in% c("17") ~ "17", 
+        str_extract(stimulus, "(?<=/)(\\d+)") %in% c("16") ~ "16", 
+        str_extract(stimulus, "(?<=/)(\\d+)") %in% c("19") ~ "19", 
+        TRUE ~ NA_character_),
+        body_size = as.integer(str_extract(stimulus, "(?<=_)(\\d+)")), 
+        
+        jersey_hilow = case_when(
+            str_extract(stimulus, "(?<=/)(\\d+)") %in% c("71", "81", "91") ~ "high",
+            str_extract(stimulus, "(?<=/)(\\d+)") %in% c("17", "18", "19") ~ "low",
+            TRUE ~ NA_character_),
+        body_size = as.integer(str_extract(stimulus, "(?<=_)(\\d+)")), 
+    )
+
+FIXED_DF <- FIXED_DF %>%
+    mutate(
+        study_id = case_when(
+            study_id == "6622d2b52b95fea970867408" ~ "A",
+            study_id == "6617fb8bb868952773cb1554" ~ "B",
+            TRUE ~ as.character(study_id) # Keep other values unchanged
+        )
+    )
+
+FIXED_DF <- FIXED_DF %>%
+    group_by(prolific_subject_id) %>%
+    mutate(prolific_subject_id = as.character(cur_group_id())) 
+
+#### NUMBER OF PARTICIPANTS 
+n_subjects <- length(files)
+
+{r}
+### SPLIT DATA; slice to remove first 3 trials, incorrectly labelled as 'response'
+
+DF_EXPERIMENT_1 <- FIXED_DF %>%
+    filter(study_id == "A")  %>%
+    select(session_id, study_id, rt, stimulus, response, body_size, prolific_subject_id, correct, body_size, jersey_number, jersey_hilow, task, correct) %>%
+  rename(subject_id = prolific_subject_id) %>%
+  group_by(session_id) %>%
+  slice(-(1:12)) %>%
+  ungroup()
+  
+  
+ 
+  n_subjects_DF1 <- DF_EXPERIMENT_1 %>%
+    summarize(n_subjects_DF1 = n_distinct(subject_id))
+  
+  
+DF_EXPERIMENT_2 <- FIXED_DF %>%
+   filter(study_id == "B") %>%
+   mutate(stimulus = lag(stimulus),
+          jersey_number = lag(jersey_number), 
+          jersey_hilow = lag(jersey_hilow), 
+          body_size = lag(body_size))  %>%
+   select(session_id, study_id, rt, stimulus, response, body_size, prolific_subject_id, correct, body_size, jersey_number, jersey_hilow, task, correct)  %>%
+  rename(subject_id = prolific_subject_id) %>%
+  group_by(session_id) %>%
+  slice(-(1:12)) %>%
+  ungroup()
+
+n_subjects_DF2 <- DF_EXPERIMENT_2 %>%
+    summarize(n_subjects_DF1 = n_distinct(subject_id))
+
+COMBINE_DF_FIXED_2 <- rbind(DF_EXPERIMENT_1,DF_EXPERIMENT_2) 
+
+{r}
+#| label: filter columns 
+#| include: false
+
+relevant_data1 <- COMBINE_DF_FIXED_2 %>%
+  select(body_size, jersey_number, correct, study_id, subject_id, rt, stimulus, jersey_hilow, response, body_size) %>%
+  filter(jersey_number != "NA") 
+
+### fix correct criteria 
+relevant_data1 <- relevant_data1 %>%
+  mutate(
+    body_size = as.numeric(body_size),
+    response = as.numeric(response),
+    correct = abs(body_size * 10 - response) <= 15
+  )
+
+{r}
+#| label: New Data frames for each experiment
+#| include: false
+relevant_data_B <- relevant_data1 %>%
+  filter(study_id == "B")
+
+relevant_data_A <- relevant_data1 %>%
+  filter(study_id == "A")
+
+{r}
+#| label: Average responses by condition
+#| include: false 
+
+response_data <- relevant_data1 %>%
+    mutate(response = as.integer(response)) %>%
+    select(body_size, jersey_number, response, subject_id, jersey_hilow, correct, study_id) %>%
+  ungroup()
+
+avg_response_by_gen_body_size <- response_data %>%
+   mutate(body_size = case_when(
+         body_size <= 5 ~ "low", 
+          body_size > 5 ~ "high"))  %>%
+  group_by(body_size) %>%
+  summarize(avg_score = mean(response))
+
+avg_response_by_body_size <- response_data %>%
+    group_by(body_size) %>%
+    summarize(avg_score = mean(response))
+
+avg_response_by_gen_jersey_number <- response_data %>%
+    group_by(jersey_hilow) %>%
+    summarize(avg_score = mean(response))
+
+avg_response_by_jersey_number <- response_data %>%
+    group_by(jersey_number) %>%
+    summarize(avg_score = mean(response))
+
+
+{r}
+#| label: ANOVA plot
+#| include: false 
+
+ANOVA_plot <- relevant_data1 %>% 
+  select(jersey_hilow, response, study_id) %>%
+  group_by(study_id, jersey_hilow) %>%
+  summarize(response_mean = mean(response),
+            response_error = sd(response) / sqrt(n()),  # standard error
+            .groups = "drop")
+
+{r}
+
+ggplot(ANOVA_plot, aes(x = jersey_hilow, y = response_mean, fill = study_id)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_errorbar(aes(ymin = response_mean - response_error, ymax = response_mean + response_error), 
+                position = position_dodge(width = 0.9), width = 0.2) +
+  labs(x = "Jersey Number (High/Low)", y = "Average response", fill = "Study ID") +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 8)
+  )
+
+
+{r}
+#| Label: anova 
+#| include: false 
+
+repeated_measures_anova <- relevant_data1 %>%
+  mutate(jersey_hilow = as.factor(jersey_hilow),
+         study_id = as.factor(study_id),
+         subject_id = as.factor(subject_id)) %>%
+  
+  
+aov(response ~ jersey_hilow * study_id + Error(subject_id/(jersey_hilow * study_id)), data = .)
+
+summary(repeated_measures_anova)
+
